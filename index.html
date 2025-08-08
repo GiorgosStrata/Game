@@ -1,15 +1,570 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>NPC Chaos Simulator</title>
-  <link rel="stylesheet" href="style.css" />
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Weapon Evolution Battles — Simulator</title>
+<style>
+  :root{--bg:#0b0b0f;--panel:#111217;--accent:#ffd166;--muted:#9aa0a6}
+  *{box-sizing:border-box;font-family:Inter,system-ui,Segoe UI,Roboto,Arial;}
+  body{margin:0;display:flex;gap:12px;align-items:flex-start;justify-content:center;background:linear-gradient(180deg,#05050a,#0b0b0f);color:#e6eef6;padding:18px 12px;}
+  #wrap{display:flex;gap:12px;max-width:1200px;width:100%;}
+  canvas{background:linear-gradient(180deg,#07102a 0%, #061425 60%);border-radius:18px;box-shadow:0 10px 30px rgba(0,0,0,.6);}
+  #ui{width:360px;padding:12px;background:rgba(16,16,20,.6);border-radius:12px;border:1px solid rgba(255,255,255,.04)}
+  h1{font-size:18px;margin:6px 0}
+  .row{display:flex;gap:8px;align-items:center;margin:8px 0}
+  button{background:var(--accent);color:#0a0a0a;border:none;padding:8px 10px;border-radius:8px;font-weight:600;cursor:pointer}
+  button.alt{background:#6fc3ff;color:#052233}
+  .mutations{margin-top:8px;padding:8px;background:#071222;border-radius:8px;color:var(--muted);font-size:13px}
+  .stat{font-size:13px;margin:4px 0}
+  label{font-size:13px;color:var(--muted)}
+  input[type=range]{width:100%}
+  .small{font-size:12px;color:var(--muted)}
+  .abilities{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+  .ability{background:#0b2a2c;padding:6px 8px;border-radius:8px;font-size:12px}
+  footer{margin-top:12px;font-size:12px;color:var(--muted)}
+</style>
 </head>
 <body>
-  <h1>NPC Chaos Simulator</h1>
-  <canvas id="gameCanvas" width="800" height="600"></canvas>
-  <button id="chaosButton">Chaos Mode</button>
-  <script src="script.js"></script>
+<div id="wrap">
+  <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:8px">
+    <canvas id="c" width="720" height="1280"></canvas>
+    <div style="display:flex;gap:8px;">
+      <button id="next">Next Fight</button>
+      <button id="auto" class="alt">Auto Run: OFF</button>
+      <button id="record" class="">Record</button>
+      <button id="download" style="display:none">Download</button>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:6px;">
+      <button id="seed" class="alt">Randomize Seed</button>
+      <button id="reset" class="">Reset Evolution</button>
+    </div>
+  </div>
+
+  <div id="ui">
+    <h1>Weapon Evolution Simulator</h1>
+    <div class="row">
+      <div style="flex:1">
+        <label>Speed</label>
+        <input id="speedRange" type="range" min="0.25" max="2.5" step="0.05" value="1">
+      </div>
+    </div>
+
+    <div class="row">
+      <div style="flex:1">
+        <label><input id="slowMo" type="checkbox"> Slow-mo on kill</label>
+      </div>
+    </div>
+
+    <div style="margin-top:8px">
+      <div class="stat"><strong>Fighter A</strong> <span id="faName" class="small"></span></div>
+      <div id="faStats" class="small"></div>
+      <div id="faAbilities" class="abilities"></div>
+    </div>
+
+    <div style="margin-top:10px">
+      <div class="stat"><strong>Fighter B</strong> <span id="fbName" class="small"></span></div>
+      <div id="fbStats" class="small"></div>
+      <div id="fbAbilities" class="abilities"></div>
+    </div>
+
+    <div class="mutations" id="mutLog">Wins => mutations will appear here.</div>
+    <footer>Tip: click <strong>Record</strong>, let a fight finish, stop the recording, then download the WebM. Use vertical canvas (720×1280) for TikTok.</footer>
+  </div>
+</div>
+
+<script>
+/* ===== Weapon Evolution Battles — Single-file Simulator =====
+   Save as index.html and open in browser. Use the Record button to save vertical WebM clips.
+   Author: ChatGPT (starter code). Tweak visuals/abilities to taste.
+*/
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+let rngSeed = Math.floor(Math.random()*1e9);
+function rng(){ // simple seeded RNG (mulberry32)
+  rngSeed = (rngSeed + 0x6D2B79F5) | 0;
+  let t = Math.imul(rngSeed ^ (rngSeed >>> 15), 1 | rngSeed);
+  t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+}
+
+function randRange(a,b){return a + (b-a)*rng();}
+function pick(arr){return arr[Math.floor(rng()*arr.length)];}
+
+const WeaponTypes = {
+  Spear: {range:220, speed:1.02, dmg:18},
+  Dagger: {range:80, speed:1.7, dmg:12},
+  Sword: {range:140, speed:1.15, dmg:16},
+  Axe: {range:120, speed:0.85, dmg:24}
+};
+
+const AbilityDefs = {
+  Fire: {desc:'Burns (DOT)', apply:onFire},
+  Ice: {desc:'Slow on hit', apply:onIce},
+  Explosive: {desc:'Area blast', apply:onExplode},
+  Lifesteal: {desc:'Heals on hit', apply:onLifesteal},
+  Stun: {desc:'Short stun', apply:onStun}
+};
+
+function createRandomFighter(name){
+  const type = pick(Object.keys(WeaponTypes));
+  const base = WeaponTypes[type];
+  return {
+    id: name,
+    type,
+    x: 0, y: H/2,
+    vx: 0, vy: 0,
+    hp: 100,
+    maxHp: 100,
+    range: base.range,
+    speed: base.speed,
+    dmg: base.dmg,
+    abilities: [],
+    cooldown:0,
+    stunned:0,
+    color: randomColor()
+  };
+}
+
+function randomColor(){
+  const palette = ['#ffd166','#ef476f','#06d6a0','#118ab2','#8338ec','#ff8fab'];
+  return pick(palette);
+}
+
+/* ----- ability effects ----- */
+function onFire(attacker, target, battle){
+  // apply burn DOT
+  target._burn = target._burn || {t:0, dmg:0};
+  target._burn.t = 180; // frames
+  target._burn.dmg = Math.max(1, Math.round(attacker.dmg*0.12));
+}
+function onIce(attacker, target, battle){
+  target._ice = 30; // frames slow
+  target.speedMul = 0.5;
+}
+function onExplode(attacker, target, battle){
+  // area damage around target
+  const rad = 80;
+  battle.addFX({type:'explosion',x:target.x,y:target.y,r:rad});
+  [battle.A, battle.B].forEach(ent=>{
+    const d = Math.hypot(ent.x-target.x, ent.y-target.y);
+    if(d <= rad){
+      ent.hp -= Math.max(1, Math.round(attacker.dmg*0.7));
+    }
+  });
+}
+function onLifesteal(attacker, target, battle){
+  const heal = Math.round(attacker.dmg*0.25);
+  attacker.hp = Math.min(attacker.maxHp, attacker.hp + heal);
+}
+function onStun(attacker, target, battle){
+  target.stunned = 30; // frames
+}
+
+/* ----- battle management ----- */
+class Battle {
+  constructor(A,B){
+    this.A = A; this.B = B;
+    this.t = 0;
+    this.fx = [];
+    this.cameraShake = 0;
+    this.slowMoFor = 0;
+    this.winner = null;
+  }
+  addFX(f){ this.fx.push(f); }
+  update(){
+    if(this.winner) return;
+    this.t++;
+    // update burn/ice ticks
+    [this.A,this.B].forEach(e=>{
+      if(e._burn && e._burn.t>0){
+        e._burn.t--;
+        if(e._burn.t % 30 === 0){
+          e.hp -= e._burn.dmg;
+          this.addFX({type:'burn',x:e.x+randRange(-8,8),y:e.y+randRange(-8,8)});
+        }
+      }
+      if(e._ice && e._ice>0){
+        e._ice--;
+        if(e._ice<=0) e.speedMul = 1;
+      }
+      if(e.stunned>0) e.stunned--;
+      if(e.cooldown>0) e.cooldown--;
+      // hp floor
+      if(e.hp<=0 && !this.winner){
+        this.winner = (e===this.A)? this.B : this.A;
+        this.cameraShake = 18;
+        if(document.getElementById('slowMo').checked) this.slowMoFor = 160;
+      }
+    });
+
+    // simple AI: move towards opponent and attack if in range
+    this.aiStep(this.A, this.B);
+    this.aiStep(this.B, this.A);
+
+    // update fx
+    this.fx = this.fx.filter(f=>{
+      if(f.type==='spark'){ f.life--; return f.life>0; }
+      if(f.type==='explosion'){ f.life--; return f.life>0; }
+      if(f.type==='burn'){ f.life--; return f.life>0; }
+      return false;
+    });
+
+    if(this.cameraShake>0) this.cameraShake *= 0.92;
+  }
+
+  aiStep(me, opp){
+    if(me.stunned>0) return;
+    const dx = opp.x - me.x;
+    const dy = opp.y - me.y;
+    const dist = Math.hypot(dx,dy);
+    // movement toward opponent (1D-ish)
+    const dir = dx>0?1:-1;
+    const speed = me.speed * (me.speedMul||1);
+    me.vx = dir * speed * 1.2;
+    me.x += me.vx * (1 + (document.getElementById('speedRange').value - 1));
+    // clamp inside scene
+    me.x = Math.max(60, Math.min(W-60, me.x));
+
+    // attack if in range
+    if(dist <= me.range && me.cooldown<=0){
+      // normal hit
+      opp.hp -= me.dmg;
+      me.cooldown = 30;
+      this.addFX({type:'spark',x:opp.x+randRange(-20,20),y:opp.y+randRange(-20,20),life:24});
+      this.cameraShake = 6;
+      // apply abilities
+      me.abilities.forEach(a=>{
+        if(AbilityDefs[a]) AbilityDefs[a].apply(me, opp, this);
+      });
+    }
+  }
+}
+
+/* ----- visuals ----- */
+function drawBattle(b){
+  // camera shake
+  const shake = b.cameraShake*(rng()-0.5);
+  ctx.save();
+  ctx.translate(shake, shake*0.6);
+
+  // background gradient
+  const g = ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0,'#061425');
+  g.addColorStop(1,'#041020');
+  ctx.fillStyle = g;
+  ctx.fillRect(0,0,W,H);
+
+  // arena ground
+  ctx.fillStyle = '#071122';
+  ctx.fillRect(0,H*0.72,W,H*0.28);
+
+  // middle decoration line
+  ctx.strokeStyle = 'rgba(255,255,255,0.03)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(W/2, H*0.72);
+  ctx.lineTo(W/2, H);
+  ctx.stroke();
+
+  // draw fighters
+  [b.A,b.B].forEach((e,idx)=>{
+    // body shadow
+    ctx.beginPath();
+    ctx.ellipse(e.x+8, e.y+60, 46, 18, 0,0,Math.PI*2);
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    ctx.fill();
+
+    // body (weapon stylized)
+    ctx.save();
+    ctx.translate(e.x,e.y);
+    // weapon shaft
+    ctx.beginPath();
+    ctx.moveTo( -8, -6 );
+    ctx.lineTo( 24, 6 );
+    ctx.lineWidth = 8;
+    ctx.strokeStyle = e.color; ctx.stroke();
+
+    // tip shape by type
+    ctx.fillStyle = e.color;
+    ctx.beginPath();
+    if(e.type==='Spear'){
+      ctx.moveTo(28,0); ctx.lineTo(42,-6); ctx.lineTo(42,6);
+    } else if(e.type==='Dagger'){
+      ctx.moveTo(28,0); ctx.lineTo(36,-5); ctx.lineTo(36,5);
+    } else if(e.type==='Sword'){
+      ctx.rect(22,-8,18,16);
+    } else { // Axe
+      ctx.moveTo(30,-16); ctx.arc(28,0,18, -1.2,1.2 );
+    }
+    ctx.fill();
+
+    // health bar
+    const hw = 180;
+    ctx.restore();
+    const barX = e.x - hw/2;
+    const barY = H*0.1 + (idx*38);
+    ctx.fillStyle = '#112229';
+    ctx.fillRect(barX-2, barY-2, hw+4, 18);
+    ctx.fillStyle = '#244b4f';
+    ctx.fillRect(barX, barY, hw, 14);
+    const pct = Math.max(0, e.hp / e.maxHp);
+    ctx.fillStyle = e.color;
+    ctx.fillRect(barX, barY, hw*pct, 14);
+    ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+    ctx.strokeRect(barX-2, barY-2, hw+4, 18);
+
+    // name + type
+    ctx.fillStyle = '#dfeff6';
+    ctx.font = '600 18px Inter';
+    ctx.fillText(`${e.id} — ${e.type}`, barX, barY - 8);
+    // abilities icons
+    ctx.font = '12px Inter';
+    let ax = barX + hw + 12;
+    e.abilities.forEach(ab=>{
+      ctx.fillStyle = '#071822'; ctx.fillRect(ax-6, barY-2, 64, 18);
+      ctx.fillStyle = '#cfe7e2'; ctx.fillText(ab, ax, barY+11);
+      ax += 72;
+    });
+
+    // draw the actual fighter circle & tip overlay
+    ctx.beginPath();
+    ctx.arc(e.x, e.y, 28, 0, Math.PI*2);
+    ctx.fillStyle = '#07172b';
+    ctx.fill();
+    // overlay emblem
+    ctx.fillStyle = e.color;
+    ctx.beginPath();
+    ctx.arc(e.x, e.y, 10, 0, Math.PI*2);
+    ctx.fill();
+  });
+
+  // draw FX
+  b.fx.forEach(f=>{
+    if(f.type==='spark'){
+      ctx.globalAlpha = 0.9;
+      ctx.beginPath();
+      ctx.arc(f.x, f.y, 8*(f.life/24), 0, Math.PI*2);
+      ctx.fillStyle = 'rgba(255,220,120,0.6)';
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+    if(f.type==='explosion'){
+      ctx.beginPath();
+      const r = f.r * (f.life/24);
+      ctx.arc(f.x,f.y,r,0,Math.PI*2);
+      ctx.fillStyle = 'rgba(255,140,60,0.12)';
+      ctx.fill();
+    }
+    if(f.type==='burn'){
+      ctx.beginPath();
+      ctx.arc(f.x,f.y,6,0,Math.PI*2);
+      ctx.fillStyle = 'rgba(255,80,40,0.4)';
+      ctx.fill();
+    }
+  });
+
+  // center scoreboard (small)
+  ctx.fillStyle = 'rgba(255,255,255,0.03)';
+  ctx.fillRect(W*0.12, H*0.74, W*0.76, 78);
+  ctx.restore();
+}
+
+/* ----- simulation loop & controls ----- */
+let fighterA = createRandomFighter('A');
+let fighterB = createRandomFighter('B');
+
+function resetPositions(){
+  fighterA.x = W*0.25; fighterA.y = H*0.52;
+  fighterB.x = W*0.75; fighterB.y = H*0.52;
+  fighterA.hp = fighterA.maxHp; fighterB.hp = fighterB.maxHp;
+  fighterA.cooldown = 0; fighterB.cooldown = 0;
+  fighterA._burn = null; fighterB._burn = null;
+  fighterA.stunned = 0; fighterB.stunned = 0;
+  fighterA.speedMul = 1; fighterB.speedMul = 1;
+}
+
+resetPositions();
+let battle = new Battle(fighterA, fighterB);
+let lastTime = performance.now();
+let playing = true;
+let autoRun = false;
+let recorder, recordedBlobs = [];
+
+function step(now){
+  requestAnimationFrame(step);
+  const speedMul = parseFloat(document.getElementById('speedRange').value);
+  const dt = (now - lastTime) * 0.06;
+  lastTime = now;
+
+  // support slow-mo effect
+  let frameAdvance = 1;
+  if(battle.slowMoFor > 0){
+    frameAdvance = 0.15;
+    battle.slowMoFor--;
+  }
+  // adjust by UI speed
+  const targetFrames = frameAdvance * speedMul;
+  for(let i=0;i<Math.max(1,Math.round(targetFrames));i++){
+    if(!battle.winner) battle.update();
+  }
+
+  // draw
+  drawBattle(battle);
+
+  // UI update values
+  updateUI();
+
+  // if winner and auto-run is on, start next fight after small pause
+  if(battle.winner && autoRun){
+    // small cooldown then mutate and start next
+    setTimeout(()=>{ if(autoRun) nextFight(); }, 900);
+    autoRun = false; // avoid triggering repeatedly; auto button will flip back on next click
+  }
+}
+requestAnimationFrame(step);
+
+/* ----- mutation & evolution ----- */
+function mutateWinner(winner, loser){
+  // 60% chance to add a new ability if less than 3, else buff a stat
+  const log = document.getElementById('mutLog');
+  if(winner.abilities.length < 3 && rng() < 0.6){
+    // give new ability not already present
+    const pool = Object.keys(AbilityDefs).filter(x=>!winner.abilities.includes(x));
+    if(pool.length){
+      const pickAb = pick(pool);
+      winner.abilities.push(pickAb);
+      log.innerText = `${winner.id} won and gained ability: ${pickAb}.`;
+      return;
+    }
+  }
+  // otherwise buff a stat
+  const stat = pick(['dmg','range','speed','maxHp']);
+  if(stat==='dmg'){ winner.dmg = Math.round(winner.dmg * (1 + randRange(0.08,0.18))); log.innerText = `${winner.id} won and +dmg!`; }
+  if(stat==='range'){ winner.range = Math.round(winner.range * (1 + randRange(0.06,0.18))); log.innerText = `${winner.id} won and +range!`; }
+  if(stat==='speed'){ winner.speed = +(winner.speed * (1 + randRange(0.03,0.12))).toFixed(3); log.innerText = `${winner.id} won and +speed!`; }
+  if(stat==='maxHp'){ winner.maxHp = Math.round(winner.maxHp * (1 + randRange(0.05,0.15))); winner.hp = winner.maxHp; log.innerText = `${winner.id} won and +HP!`; }
+}
+
+/* ----- UI wiring ----- */
+document.getElementById('next').addEventListener('click', ()=> nextFight());
+document.getElementById('auto').addEventListener('click', ()=>{
+  autoRun = !autoRun;
+  document.getElementById('auto').innerText = `Auto Run: ${autoRun? 'ON':'OFF'}`;
+  if(autoRun && battle.winner) nextFight();
+});
+document.getElementById('seed').addEventListener('click', ()=>{
+  rngSeed = Math.floor(Math.random()*1e9);
+  document.getElementById('mutLog').innerText = `Seed randomized: ${rngSeed}`;
+});
+document.getElementById('reset').addEventListener('click', ()=>{
+  // reset fighters to fresh randoms and clear evolution
+  fighterA = createRandomFighter('A'); fighterB = createRandomFighter('B');
+  resetPositions();
+  battle = new Battle(fighterA, fighterB);
+  document.getElementById('mutLog').innerText = 'Evolution reset. New random fighters.';
+});
+
+function nextFight(){
+  if(!battle.winner){
+    // fast-forward fight until winner -- but we'll just wait for fight to end naturally
+    // instead we can nudge them to collide by moving them closer
+    // if user hits Next while a fight is running, we just speed simulation
+    // but here, if fight finished, mutate and start a new battle
+    if(battle.winner){
+      // mutate then spawn new challenger with persisted winner
+      const w = battle.winner;
+      const l = (w===battle.A)? battle.B: battle.A;
+      mutateWinner(w, l);
+      // create new opponent (carry some traits randomness)
+      const newOpp = createRandomFighter( l.id );
+      // keep winner as A and spawn B
+      fighterA = w;
+      fighterB = newOpp;
+      resetPositions();
+      battle = new Battle(fighterA, fighterB);
+      return;
+    }
+  } else {
+    // mutate and new fight
+    const w = battle.winner;
+    const l = (w===battle.A)? battle.B: battle.A;
+    mutateWinner(w, l);
+    // new opponent
+    const newOpp = createRandomFighter( l.id );
+    // keep winner as A
+    fighterA = w;
+    fighterB = newOpp;
+    resetPositions();
+    battle = new Battle(fighterA, fighterB);
+  }
+}
+
+/* ----- UI live text ----- */
+function updateUI(){
+  document.getElementById('faName').innerText = `${fighterA.id} (${fighterA.type})`;
+  document.getElementById('fbName').innerText = `${fighterB.id} (${fighterB.type})`;
+  document.getElementById('faStats').innerText = `HP:${fighterA.hp.toFixed(0)}/${fighterA.maxHp} • DMG:${fighterA.dmg} • RNG:${fighterA.range} • SPD:${fighterA.speed.toFixed(2)}`;
+  document.getElementById('fbStats').innerText = `HP:${fighterB.hp.toFixed(0)}/${fighterB.maxHp} • DMG:${fighterB.dmg} • RNG:${fighterB.range} • SPD:${fighterB.speed.toFixed(2)}`;
+  const elA = document.getElementById('faAbilities'); elA.innerHTML = '';
+  fighterA.abilities.forEach(a => { const d=document.createElement('div'); d.className='ability'; d.innerText=a; elA.appendChild(d); });
+  const elB = document.getElementById('fbAbilities'); elB.innerHTML = '';
+  fighterB.abilities.forEach(a => { const d=document.createElement('div'); d.className='ability'; d.innerText=a; elB.appendChild(d); });
+
+  // when winner displayed, offer to mutate soon
+  if(battle.winner){
+    document.getElementById('mutLog').innerText = `${battle.winner.id} wins! Click Next Fight to evolve and continue.`;
+  }
+}
+
+/* ----- Recording (MediaRecorder) ----- */
+const recordBtn = document.getElementById('record');
+const downloadBtn = document.getElementById('download');
+recordBtn.addEventListener('click', ()=> toggleRecord());
+
+async function toggleRecord(){
+  if(recorder && recorder.state === 'recording'){
+    recorder.stop();
+    recordBtn.innerText = 'Record';
+    return;
+  }
+  // start recording the canvas stream
+  const stream = canvas.captureStream(60); // 60fps ideal
+  recordedBlobs = [];
+  const options = {mimeType: 'video/webm;codecs=vp9'};
+  try {
+    recorder = new MediaRecorder(stream, options);
+  } catch(e){
+    alert('MediaRecorder not supported in this browser.');
+    return;
+  }
+  recorder.ondataavailable = e => { if(e.data && e.data.size>0) recordedBlobs.push(e.data); };
+  recorder.onstop = ()=> {
+    const blob = new Blob(recordedBlobs, {type:'video/webm'});
+    const url = URL.createObjectURL(blob);
+    downloadBtn.style.display = 'inline-block';
+    downloadBtn.onclick = ()=> {
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `battle_${Date.now()}.webm`;
+      a.click();
+    };
+  };
+  recorder.start();
+  recordBtn.innerText = 'Stop';
+}
+
+/* ===== small utilities ===== */
+function clamp(a,b,c){return Math.max(b, Math.min(c, a));}
+
+/* ===== initial setup: give fighters 1 random ability each for variety ===== */
+fighterA.abilities.push(pick(Object.keys(AbilityDefs)));
+fighterB.abilities.push(pick(Object.keys(AbilityDefs)));
+document.getElementById('mutLog').innerText = `Initial abilities assigned. Seed: ${rngSeed}`;
+
+</script>
 </body>
 </html>
